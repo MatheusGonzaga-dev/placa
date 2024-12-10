@@ -3,11 +3,16 @@ import requests
 import base64
 import json
 import tkinter as tk
+from tkinter import messagebox
+from tkinter import ttk
 from PIL import Image, ImageTk
 import re
 from threading import Thread
 from queue import Queue
 import logging
+import time
+import os
+import json
 
 # Configuração do logger
 logging.basicConfig(
@@ -16,6 +21,11 @@ logging.basicConfig(
     filename="log_deteccao_placa.log",
     filemode="w",
 )
+
+# Variáveis globais para controle
+last_sent_time = {1: 0, 2: 0, 3: 0}  # Controle de tempo para envio em cada câmera
+FRAME_WIDTH = 640  # Largura padrão para exibição
+FRAME_HEIGHT = 360  # Altura padrão para exibição
 
 
 def recognize_plate_google(image):
@@ -56,21 +66,11 @@ def recognize_plate_google(image):
 
 
 def preprocess_plate(roi):
-    """Pré-processa a região da placa sem binarização."""
-    logging.info("Pré-processando a região da placa sem binarização.")
+    """Pré-processa a região da placa."""
     try:
-        # Redimensionar para maior resolução
         roi = cv2.resize(roi, (roi.shape[1] * 2, roi.shape[0] * 2))
-
-        # Aumentar o contraste
         roi = cv2.convertScaleAbs(roi, alpha=1.5, beta=10)
-
-        # Reduzir ruído
         roi = cv2.GaussianBlur(roi, (5, 5), 0)
-
-        # Salvar a imagem processada para depuração
-        cv2.imwrite("placa_preprocessada.jpg", roi)
-        logging.info("Pré-processamento concluído e imagem salva sem binarização.")
         return roi
     except Exception as e:
         logging.error(f"Erro durante o pré-processamento: {e}")
@@ -78,214 +78,331 @@ def preprocess_plate(roi):
 
 
 def filter_plate_text(text):
-    """Filtra o texto para encontrar um padrão de placa brasileira e corrige erros comuns."""
-    logging.info(f"Filtrando texto para padrões de placa: {text}")
+    """Filtra o texto para encontrar um padrão de placa brasileira."""
     matches = re.findall(r'[A-Z]{3}[0-9][A-Z][0-9]{2}', text)
-    if matches:
-        plate = matches[0]
-        # Corrigir erros comuns de OCR
-        plate = plate.replace('N', 'W')  # Substituir 'N' por 'W' se necessário
-        logging.info(f"Placa válida encontrada: {plate}")
-        return plate
-    else:
-        logging.info("Nenhuma placa válida encontrada no texto.")
-        return None
+    return matches[0] if matches else None
 
 
-def extract_plate_region(frame, camera_id=1):
-    """Define uma região de interesse (ROI) para capturar a placa."""
-    logging.info(f"Extraindo ROI da câmera {camera_id}.")
-    height, width, _ = frame.shape
-
-    if camera_id == 1:
-        # Configuração para câmera 1
-        roi_top = int(height * 0.55)
-        roi_bottom = int(height * 0.85)
-        roi_left = int(width * 0.30)
-        roi_right = int(width * 0.70)
-    elif camera_id == 2:
-        # Configuração para câmera 2
-        roi_top = int(height * 0.70)   # Região mais abaixo
-        roi_bottom = int(height * 0.95)  # Inclui mais da parte inferior
-        roi_left = int(width * 0.30)   # Mais à esquerda
-        roi_right = int(width * 0.85)  # Mais à direita
-    elif camera_id == 3:
-        # Configuração para câmera 3
-        roi_top = int(height * 0.60)   # Ajuste específico para a câmera 3
-        roi_bottom = int(height * 0.90)  # Ajuste conforme necessário
-        roi_left = int(width * 0.25)   # Ajuste conforme necessário
-        roi_right = int(width * 0.80)  # Ajuste conforme necessário
-
-    # Extrair a ROI da imagem
-    roi = frame[roi_top:roi_bottom, roi_left:roi_right]
-    # Desenhar um retângulo na imagem para verificar visualmente a ROI
-    cv2.rectangle(frame, (roi_left, roi_top), (roi_right, roi_bottom), (0, 255, 0), 2)
-    logging.debug(f"ROI extraída (Câmera {camera_id}): Top={roi_top}, Bottom={roi_bottom}, Left={roi_left}, Right={roi_right}")
-    return roi
-
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Detecção de Placas - Três Câmeras")
-
-        # Configuração da câmera 1
-        self.label_title1 = tk.Label(root, text="Câmera 1", font=("Helvetica", 14, "bold"))
-        self.label_title1.grid(row=0, column=0)
-        self.video_label1 = tk.Label(root, text="Carregando Câmera 1...", font=("Helvetica", 12))
-        self.video_label1.grid(row=1, column=0)
-        self.plate_label1 = tk.Label(root, text="Placa Detectada (Câmera 1):", font=("Helvetica", 16))
-        self.plate_label1.grid(row=2, column=0)
-
-        # Configuração da câmera 2
-        self.label_title2 = tk.Label(root, text="Câmera 2", font=("Helvetica", 14, "bold"))
-        self.label_title2.grid(row=0, column=1)
-        self.video_label2 = tk.Label(root, text="Carregando Câmera 2...", font=("Helvetica", 12))
-        self.video_label2.grid(row=1, column=1)
-        self.plate_label2 = tk.Label(root, text="Placa Detectada (Câmera 2):", font=("Helvetica", 16))
-        self.plate_label2.grid(row=2, column=1)
-
-        # Configuração da câmera 3
-        self.label_title3 = tk.Label(root, text="Câmera 3", font=("Helvetica", 14, "bold"))
-        self.label_title3.grid(row=0, column=2)
-        self.video_label3 = tk.Label(root, text="Carregando Câmera 3...", font=("Helvetica", 12))
-        self.video_label3.grid(row=1, column=2)
-        self.plate_label3 = tk.Label(root, text="Placa Detectada (Câmera 3):", font=("Helvetica", 16))
-        self.plate_label3.grid(row=2, column=2)
-
+class CameraApp:
+    def __init__(self, parent, camera_id, rtsp_url):
+        self.parent = parent
+        self.camera_id = camera_id
+        self.rtsp_url = rtsp_url
         self.capturing = True
-        self.frame_queue1 = Queue(maxsize=1)
-        self.frame_queue2 = Queue(maxsize=1)
-        self.frame_queue3 = Queue(maxsize=1)
 
-        self.cap1 = None
-        self.cap2 = None
-        self.cap3 = None
+        self.frame_queue = Queue(maxsize=1)
+        self.roi_start = (0, 0)
+        self.roi_end = (0, 0)
+        self.selecting = False
+        self.detected_plate = "Nenhuma"
 
-        # Inicia as câmeras
-        Thread(target=self.initialize_camera1, daemon=True).start()
-        Thread(target=self.initialize_camera2, daemon=True).start()
-        Thread(target=self.initialize_camera3, daemon=True).start()
+        # Arquivo para salvar e carregar o ROI
+        self.roi_file = f"roi_camera_{self.camera_id}.json"
+        self.load_roi()  # Carregar ROI salvo, se existir
 
+        # Frame principal para a câmera
+        self.main_frame = tk.Frame(parent, bg="white", borderwidth=2, relief="solid")
+        self.main_frame.grid(row=(camera_id - 1) // 2, column=(camera_id - 1) % 2, padx=5, pady=5, sticky="nsew")
+
+        # Rótulo de vídeo
+        self.video_label = tk.Label(self.main_frame, bg="black", text=f"Carregando câmera {camera_id}...", font=("Arial", 10), fg="white")
+        self.video_label.pack(padx=5, pady=5, fill="both", expand=True)
+
+        # Rótulo da placa detectada
+        self.plate_label = tk.Label(
+            self.main_frame, text=f"Câmera {camera_id}: Nenhuma placa detectada.", font=("Arial", 12), fg="green", bg="white"
+        )
+        self.plate_label.pack(pady=5)
+
+        # Vincular eventos do mouse para seleção de ROI
+        self.video_label.bind("<ButtonPress-1>", self.start_select)
+        self.video_label.bind("<B1-Motion>", self.update_select)
+        self.video_label.bind("<ButtonRelease-1>", self.end_select)
+
+        # Iniciar a captura da câmera em uma nova thread
+        Thread(target=self.initialize_camera, daemon=True).start()
         self.update_video()
-    def initialize_camera1(self):
-        """Configura a câmera 1."""
-        try:
-            rtsp_url1 = 'rtsp://admin:lks@123241@192.168.5.80:554/cam/realmonitor?channel=1&subtype=1'
-            self.cap1 = cv2.VideoCapture(rtsp_url1)
-            if not self.cap1.isOpened():
-                logging.error("Erro ao abrir a câmera 1.")
-            else:
-                logging.info("Câmera 1 carregada com sucesso.")
-            Thread(target=self.capture_video, args=(self.cap1, self.frame_queue1, 1), daemon=True).start()
-        except Exception as e:
-            logging.error(f"Erro na inicialização da câmera 1: {e}")
 
-    def initialize_camera2(self):
-        """Configura a câmera 2."""
-        try:
-            rtsp_url2 = 'rtsp://admin:admin@192.168.5.72:554/'
-            self.cap2 = cv2.VideoCapture(rtsp_url2)
-            if not self.cap2.isOpened():
-                logging.error("Erro ao abrir a câmera 2. Verifique o URL RTSP, usuário e senha.")
-            else:
-                logging.info("Câmera 2 carregada com sucesso.")
-            Thread(target=self.capture_video, args=(self.cap2, self.frame_queue2, 2), daemon=True).start()
-        except Exception as e:
-            logging.error(f"Erro na inicialização da câmera 2: {e}")
 
-    def initialize_camera3(self):
-        """Configura a câmera 3."""
+    def initialize_camera(self):
+        """Configura a câmera."""
         try:
-            rtsp_url3 = 'rtsp://admin:admin@192.168.5.67:554/'  # URL da câmera 3
-            self.cap3 = cv2.VideoCapture(rtsp_url3)
-            if not self.cap3.isOpened():
-                logging.error("Erro ao abrir a câmera 3. Verifique o URL RTSP, usuário e senha.")
+            self.cap = cv2.VideoCapture(self.rtsp_url)
+            if not self.cap.isOpened():
+                logging.error(f"Erro ao abrir a câmera {self.camera_id}.")
             else:
-                logging.info("Câmera 3 carregada com sucesso.")
-            Thread(target=self.capture_video, args=(self.cap3, self.frame_queue3, 3), daemon=True).start()
+                logging.info(f"Câmera {self.camera_id} carregada com sucesso.")
+            Thread(target=self.capture_video, daemon=True).start()
         except Exception as e:
-            logging.error(f"Erro na inicialização da câmera 3: {e}")
+            logging.error(f"Erro na inicialização da câmera {self.camera_id}: {e}")
 
-    def capture_video(self, cap, frame_queue, camera_id):
-        """Captura frames da câmera e coloca na fila."""
+    def capture_video(self):
+        """Captura frames da câmera."""
+        global last_sent_time
+
         while self.capturing:
-            ret, frame = cap.read()
+            ret, frame = self.cap.read()
             if ret:
-                if not frame_queue.empty():
-                    frame_queue.get()
-                frame_queue.put(frame)
-            else:
-                logging.warning(f"Falha ao capturar frame da câmera {camera_id}.")
+                # Redimensionar frame para tamanho padrão
+                frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
 
-    def process_frame(self, frame, plate_label, camera_id):
-        """Processa o frame para identificar a placa."""
-        logging.info(f"Processando frame da câmera {camera_id}.")
-        plate_region = extract_plate_region(frame, camera_id)
-        if plate_region is not None:
-            processed_plate = preprocess_plate(plate_region)
-            plate_text = recognize_plate_google(processed_plate)
-            if plate_text:
-                plate_label.config(text=f"Placa Detectada: {plate_text}")
-                logging.info(f"Câmera {camera_id}: Placa detectada: {plate_text}")
-            else:
-                plate_label.config(text="Placa Detectada: Nenhuma")
-                logging.info(f"Câmera {camera_id}: Nenhuma placa detectada.")
-        else:
-            plate_label.config(text="Placa Detectada: Nenhuma")
-            logging.warning(f"Câmera {camera_id}: Falha ao extrair ROI.")
+                # Desenhar ROI
+                if self.roi_start != (0, 0) and self.roi_end != (0, 0):
+                    cv2.rectangle(frame, self.roi_start, self.roi_end, (0, 255, 0), 2)
+
+                    # Processar a ROI a cada 1 segundo
+                    current_time = time.time()
+                    if current_time - last_sent_time[self.camera_id] > 1:  # 1 segundo
+                        x1, y1 = self.roi_start
+                        x2, y2 = self.roi_end
+                        roi = frame[y1:y2, x1:x2]
+                        if roi.size > 0:
+                            plate = recognize_plate_google(preprocess_plate(roi))
+                            if plate:
+                                self.detected_plate = plate
+                                self.plate_label.config(text=f"Placa Detectada (Câmera {self.camera_id}): {self.detected_plate}")
+                            else:
+                                self.plate_label.config(text=f"Placa Detectada (Câmera {self.camera_id}): Nenhuma")
+                        last_sent_time[self.camera_id] = current_time
+
+                # Atualizar feed
+                if not self.frame_queue.full():
+                    self.frame_queue.put(frame)
+
+
+
+    def save_roi(self):
+        """Salva as coordenadas do ROI em um arquivo JSON."""
+        roi_data = {"start": self.roi_start, "end": self.roi_end}
+        with open(self.roi_file, "w") as file:
+            json.dump(roi_data, file)
+        logging.info(f"ROI salvo para a câmera {self.camera_id}: {roi_data}")
+
+    def load_roi(self):
+        """Carrega as coordenadas do ROI de um arquivo JSON, se existir."""
+        if os.path.exists(self.roi_file):
+            with open(self.roi_file, "r") as file:
+                roi_data = json.load(file)
+                self.roi_start = tuple(roi_data.get("start", (0, 0)))
+                self.roi_end = tuple(roi_data.get("end", (0, 0)))
+                logging.info(f"ROI carregado para a câmera {self.camera_id}: {roi_data}")
+
+    def start_select(self, event):
+        """Inicia a seleção da ROI."""
+        self.roi_start = (event.x, event.y)
+        self.selecting = True
+
+    def update_select(self, event):
+        """Atualiza a seleção da ROI enquanto arrasta."""
+        self.roi_end = (event.x, event.y)
+
+    def end_select(self, event):
+        """Finaliza a seleção da ROI."""
+        self.roi_end = (event.x, event.y)
+        self.selecting = False
+        self.save_roi()  # Salvar ROI ao final da seleção
+        logging.info(f"ROI selecionada (Câmera {self.camera_id}): Início={self.roi_start}, Fim={self.roi_end}")
 
     def update_video(self):
-        """Atualiza os frames das câmeras."""
-        # Atualiza vídeo da câmera 1
-        if not self.frame_queue1.empty():
-            frame1 = self.frame_queue1.get()
-            frame1 = cv2.resize(frame1, (640, 480))
-            frame_rgb1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
-            img1 = Image.fromarray(frame_rgb1)
-            imgtk1 = ImageTk.PhotoImage(image=img1)
-            self.video_label1.imgtk = imgtk1
-            self.video_label1.configure(image=imgtk1)
+        """Atualiza os frames da câmera."""
+        if not self.frame_queue.empty():
+            frame = self.frame_queue.get()
 
-            Thread(target=self.process_frame, args=(frame1, self.plate_label1, 1)).start()
+            # Desenhar ROI carregada, se existir
+            if self.roi_start != (0, 0) and self.roi_end != (0, 0):
+                cv2.rectangle(frame, self.roi_start, self.roi_end, (0, 255, 0), 2)
 
-        # Atualiza vídeo da câmera 2
-        if not self.frame_queue2.empty():
-            frame2 = self.frame_queue2.get()
-            frame2 = cv2.resize(frame2, (640, 480))
-            frame_rgb2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2RGB)
-            img2 = Image.fromarray(frame_rgb2)
-            imgtk2 = ImageTk.PhotoImage(image=img2)
-            self.video_label2.imgtk = imgtk2
-            self.video_label2.configure(image=imgtk2)
-
-            Thread(target=self.process_frame, args=(frame2, self.plate_label2, 2)).start()
-
-        # Atualiza vídeo da câmera 3
-        if not self.frame_queue3.empty():
-            frame3 = self.frame_queue3.get()
-            frame3 = cv2.resize(frame3, (640, 480))
-            frame_rgb3 = cv2.cvtColor(frame3, cv2.COLOR_BGR2RGB)
-            img3 = Image.fromarray(frame_rgb3)
-            imgtk3 = ImageTk.PhotoImage(image=img3)
-            self.video_label3.imgtk = imgtk3
-            self.video_label3.configure(image=imgtk3)
-
-            Thread(target=self.process_frame, args=(frame3, self.plate_label3, 3)).start()
-
-        self.root.after(33, self.update_video)
-
-    def __del__(self):
-        """Libera recursos ao finalizar."""
-        self.capturing = False
-        if self.cap1 and self.cap1.isOpened():
-            self.cap1.release()
-        if self.cap2 and self.cap2.isOpened():
-            self.cap2.release()
-        if self.cap3 and self.cap3.isOpened():
-            self.cap3.release()
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.video_label.imgtk = imgtk
+            self.video_label.configure(image=imgtk)
+        self.parent.after(33, self.update_video)
 
 
-# Inicializa a interface
-root = tk.Tk()
-app = App(root)
-root.mainloop()
+# Inicializa a interface principal
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Detecção de Placas - Multicâmeras")
+        self.geometry("1200x800")
+        self.configure(bg="white")
+
+        # Caminho do arquivo de configuração
+        self.config_file = "cameras.json"
+        self.cameras_config = self.load_camera_config()
+
+        # Menu lateral estilizado
+        self.sidebar = tk.Frame(self, bg="#283747", width=250)
+        self.sidebar.pack(side="left", fill="y")
+
+        # Adicionar logo ao menu
+        self.logo_image = Image.open("retaguarda.png")
+        self.logo_image = self.logo_image.resize((150, 150), Image.LANCZOS)
+        self.logo_photo = ImageTk.PhotoImage(self.logo_image)
+        self.logo_label = tk.Label(self.sidebar, image=self.logo_photo, bg="#283747")
+        self.logo_label.pack(pady=20)
+
+        # Botão para expandir/recolher o menu
+        self.toggle_button = tk.Button(
+            self.sidebar,
+            text="≡",
+            bg="#1C2833",
+            fg="white",
+            font=("Arial", 16, "bold"),
+            command=self.toggle_menu,
+            relief="flat",
+        )
+        self.toggle_button.pack(pady=15, padx=10)
+
+        # Botão Configurar câmera
+        self.config_button = tk.Button(
+            self.sidebar,
+            text="Configurar Câmera",
+            bg="#117A65",
+            fg="white",
+            font=("Arial", 14, "bold"),
+            command=self.configure_camera,
+            relief="flat",
+        )
+        self.config_button.pack(pady=10, padx=20, fill="x")
+
+        # Botão Gerenciar Câmeras
+        self.manage_button = tk.Button(
+            self.sidebar,
+            text="Gerenciar Câmeras",
+            bg="#D35400",
+            fg="white",
+            font=("Arial", 14, "bold"),
+            command=self.manage_cameras,
+            relief="flat",
+        )
+        self.manage_button.pack(pady=10, padx=20, fill="x")
+
+        # Frame principal
+        self.main_frame = tk.Frame(self, bg="white")
+        self.main_frame.pack(side="right", fill="both", expand=True)
+
+        # Tornar a grade principal responsiva
+        for i in range(2):  # 2 linhas
+            self.main_frame.grid_rowconfigure(i, weight=1)
+        for j in range(2):  # 2 colunas
+            self.main_frame.grid_columnconfigure(j, weight=1)
+
+        # Carregar as câmeras configuradas
+        self.cameras = []
+        self.load_cameras()
+
+    def toggle_menu(self):
+        """Expande ou recolhe o menu lateral."""
+        if self.sidebar.winfo_ismapped():
+            self.sidebar.pack_forget()  # Recolher o menu
+            self.icon_button.lift()  # Mostrar o botão de ícone
+        else:
+            self.sidebar.pack(side="left", fill="y")  # Expandir o menu
+            self.icon_button.lower()  # Esconder o botão de ícone
+
+    def configure_camera(self):
+        """Abre a janela para configurar uma nova câmera."""
+        config_window = tk.Toplevel(self)
+        config_window.title("Configurar Câmera")
+        config_window.geometry("400x200")
+        config_window.configure(bg="white")
+
+        # Campo para selecionar o número da câmera
+        tk.Label(config_window, text="Número da Câmera:", bg="white", font=("Arial", 12)).pack(pady=5)
+        camera_number = ttk.Combobox(config_window, values=["1", "2", "3", "4", "5", "6"], font=("Arial", 12))
+        camera_number.pack(pady=5)
+
+        # Campo para inserir o caminho da câmera
+        tk.Label(config_window, text="URL da Câmera (RTSP):", bg="white", font=("Arial", 12)).pack(pady=5)
+        camera_url = tk.Entry(config_window, width=40, font=("Arial", 12))
+        camera_url.pack(pady=5)
+
+        def save_configuration():
+            cam_number = camera_number.get()
+            cam_url = camera_url.get()
+
+            if not cam_number or not cam_url:
+                messagebox.showerror("Erro", "Por favor, preencha todos os campos!")
+                return
+
+            try:
+                # Criar uma nova instância de CameraApp para a nova câmera
+                self.cameras.append(CameraApp(self.main_frame, int(cam_number), cam_url))
+                self.cameras_config.append({"camera_id": int(cam_number), "url": cam_url})
+                self.save_camera_config()
+
+                messagebox.showinfo("Sucesso", f"Câmera {cam_number} configurada com sucesso!")
+                config_window.destroy()
+
+            except Exception as e:
+                messagebox.showerror("Erro", f"Falha ao configurar a câmera: {e}")
+
+        save_button = tk.Button(
+            config_window, text="Salvar Configuração", bg="#117A65", fg="white", font=("Arial", 12), command=save_configuration
+        )
+        save_button.pack(pady=20)
+
+    def manage_cameras(self):
+        """Abre uma janela para gerenciar câmeras (remover)."""
+        manage_window = tk.Toplevel(self)
+        manage_window.title("Gerenciar Câmeras")
+        manage_window.geometry("400x300")
+        manage_window.configure(bg="white")
+
+        tk.Label(manage_window, text="Câmeras Configuradas:", bg="white", font=("Arial", 14)).pack(pady=10)
+
+        camera_listbox = tk.Listbox(manage_window, font=("Arial", 12))
+        camera_listbox.pack(pady=10, padx=10, fill="both", expand=True)
+
+        # Preencher a lista com câmeras
+        for cam in self.cameras_config:
+            camera_listbox.insert(tk.END, f"Câmera {cam['camera_id']} - {cam['url']}")
+
+        def remove_selected():
+            selected = camera_listbox.curselection()
+            if not selected:
+                messagebox.showerror("Erro", "Selecione uma câmera para remover!")
+                return
+
+            index = selected[0]
+            del self.cameras_config[index]
+            self.cameras[index].main_frame.destroy()
+            del self.cameras[index]
+
+            self.save_camera_config()
+            camera_listbox.delete(index)
+
+            messagebox.showinfo("Sucesso", "Câmera removida com sucesso!")
+
+        remove_button = tk.Button(
+            manage_window, text="Remover Câmera", bg="#C0392B", fg="white", font=("Arial", 12), command=remove_selected
+        )
+        remove_button.pack(pady=10)
+
+    def load_camera_config(self):
+        """Carrega as configurações de câmeras de um arquivo JSON."""
+        if os.path.exists(self.config_file):
+            with open(self.config_file, "r") as file:
+                return json.load(file)
+        return []
+
+    def save_camera_config(self):
+        """Salva as configurações de câmeras em um arquivo JSON."""
+        with open(self.config_file, "w") as file:
+            json.dump(self.cameras_config, file)
+
+    def load_cameras(self):
+        """Carrega as câmeras configuradas na interface."""
+        for cam in self.cameras_config:
+            self.cameras.append(CameraApp(self.main_frame, cam["camera_id"], cam["url"]))
+
+
+# Inicializa o aplicativo
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
+
+
+
